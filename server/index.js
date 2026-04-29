@@ -13,6 +13,7 @@ app.use(cors({ origin: true }));
 app.use(express.json({ limit: '1mb' }));
 
 let dbReady = false;
+let lastDbError = null;
 
 async function ensureDb() {
   try {
@@ -20,10 +21,12 @@ async function ensureDb() {
     await initSchema();
     await seedDemoData();
     dbReady = true;
+    lastDbError = null;
     console.log('[db] MySQL 已连接并完成表结构与演示数据初始化');
   } catch (e) {
     dbReady = false;
-    console.error('[db] MySQL 不可用:', e.message);
+    lastDbError = e.message || String(e);
+    console.error('[db] MySQL 不可用:', lastDbError);
     console.error('[db] 请在本机 MySQL 先执行: CREATE DATABASE hengyi_huoke CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;');
     console.error('[db] 并核对项目根目录 .env 中 MYSQL_HOST / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE');
   }
@@ -40,6 +43,27 @@ app.get('/api/health', async (_req, res) => {
     ok: true,
     db: dbReady,
     time: new Date().toISOString(),
+  });
+});
+
+/** 部署自检：不含密码，便于 curl 排查 */
+app.get('/api/ready', (_req, res) => {
+  const indexHtmlPath = path.join(rootDir, 'dist', 'index.html');
+  const has = (k) => Boolean(process.env[k] && String(process.env[k]).trim());
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    port: PORT,
+    envFile: fs.existsSync(envPath),
+    dist: fs.existsSync(indexHtmlPath),
+    db: dbReady,
+    dbError: dbReady ? null : lastDbError,
+    mysqlEnv: {
+      MYSQL_HOST: has('MYSQL_HOST'),
+      MYSQL_USER: has('MYSQL_USER'),
+      MYSQL_DATABASE: has('MYSQL_DATABASE'),
+      MYSQL_PASSWORD: has('MYSQL_PASSWORD'),
+    },
   });
 });
 
