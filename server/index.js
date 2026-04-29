@@ -1,7 +1,9 @@
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+const fs = require('fs');
+const path = require('path');
+
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const crypto = require('crypto');
 const { TABLES, getPool, initSchema, seedDemoData, ping } = require('./db');
 
@@ -22,8 +24,15 @@ async function ensureDb() {
   } catch (e) {
     dbReady = false;
     console.error('[db] MySQL 不可用:', e.message);
-    console.error('[db] 请检查 .env 中 MYSQL_* 配置，或运行 docker compose up -d');
+    console.error('[db] 请在本机 MySQL 先执行: CREATE DATABASE hengyi_huoke CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;');
+    console.error('[db] 并核对项目根目录 .env 中 MYSQL_HOST / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE');
   }
+}
+
+const rootDir = path.join(__dirname, '..');
+const envPath = path.join(rootDir, '.env');
+if (!fs.existsSync(envPath)) {
+  console.warn('[env] 未找到 .env，请复制: cp .env.example .env 并按服务器填写 MYSQL_*');
 }
 
 app.get('/api/health', async (_req, res) => {
@@ -169,17 +178,44 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-const dist = path.join(__dirname, '..', 'dist');
-app.use(express.static(dist));
-app.use((req, res, next) => {
-  if (req.method !== 'GET' || req.path.startsWith('/api')) return next();
-  res.sendFile(path.join(dist, 'index.html'), (err) => {
-    if (err) next(err);
+const dist = path.join(rootDir, 'dist');
+const indexHtmlPath = path.join(dist, 'index.html');
+
+function setupFrontend() {
+  if (!fs.existsSync(indexHtmlPath)) {
+    console.error('[ui] 未找到 dist/index.html，浏览器访问将提示 503。请在项目根目录执行: npm ci && npm run build');
+    app.use((req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      if (req.method !== 'GET') return next();
+      res
+        .status(503)
+        .type('html')
+        .send(
+          '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>需先构建前端</title></head><body style="font-family:system-ui,sans-serif;padding:24px;max-width:560px;">' +
+            '<h1 style="margin-top:0;">503 · 前端未构建</h1>' +
+            '<p>缺少 <code>dist/index.html</code>。在服务器项目根目录执行：</p>' +
+            '<pre style="background:#f1f5f9;padding:12px;border-radius:8px;overflow:auto;">npm ci\nnpm run build\nnpm run start</pre>' +
+            '<p>然后重启 Node。API（如 <code>/api/health</code>）在未构建时仍可用。</p>' +
+            '</body></html>'
+        );
+    });
+    return;
+  }
+  app.use(express.static(dist));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api')) return next();
+    res.sendFile(indexHtmlPath, (err) => {
+      if (err) next(err);
+    });
   });
-});
+}
+
+setupFrontend();
 
 ensureDb().then(() => {
-  app.listen(PORT, () => {
-    console.log(`桓颐装饰 AI 获客服务已启动 http://localhost:${PORT}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`桓颐装饰 AI 获客服务已启动`);
+    console.log(`  本机: http://127.0.0.1:${PORT}/`);
+    console.log(`  外网: http://服务器公网IP:${PORT}/ （安全组/ufw 需放行该端口）`);
   });
 });
