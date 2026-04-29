@@ -1,0 +1,27 @@
+{
+  "name": "hengyi-ai-huoke",
+  "private": true,
+  "description": "桓颐装饰 AI 获客系统",
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,magenta \"npm run server:dev\" \"npm run client:dev\"",
+    "server:dev": "nodemon server/index.js",
+    "client:dev": "vite --config vite.config.mjs",
+    "build": "vite build --config vite.config.mjs",
+    "start": "node server/index.js",
+    "preview": "npm run build && npm run start"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "mysql2": "^3.22.3",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.2.1",
+    "nodemon": "^3.1.14",
+    "vite": "^5.4.11"
+  }
+}

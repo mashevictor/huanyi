@@ -1,0 +1,185 @@
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const crypto = require('crypto');
+const { TABLES, getPool, initSchema, seedDemoData, ping } = require('./db');
+
+const PORT = Number(process.env.PORT) || 3001;
+const app = express();
+app.use(cors({ origin: true }));
+app.use(express.json({ limit: '1mb' }));
+
+let dbReady = false;
+
+async function ensureDb() {
+  try {
+    await ping();
+    await initSchema();
+    await seedDemoData();
+    dbReady = true;
+    console.log('[db] MySQL 已连接并完成表结构与演示数据初始化');
+  } catch (e) {
+    dbReady = false;
+    console.error('[db] MySQL 不可用:', e.message);
+    console.error('[db] 请检查 .env 中 MYSQL_* 配置，或运行 docker compose up -d');
+  }
+}
+
+app.get('/api/health', async (_req, res) => {
+  res.json({
+    ok: true,
+    db: dbReady,
+    time: new Date().toISOString(),
+  });
+});
+
+app.post('/api/leads', async (req, res) => {
+  const { name, phone, interest, scenario, note } = req.body || {};
+  if (!name || !phone) {
+    return res.status(400).json({ error: '请填写姓名与联系电话' });
+  }
+  if (!dbReady) {
+    return res.status(503).json({ error: '数据库未就绪，请稍后重试或联系管理员' });
+  }
+  try {
+    const pool = getPool();
+    const [r] = await pool.query(
+      `INSERT INTO ${TABLES.leads} (name, phone, interest, scenario, note) VALUES (?,?,?,?,?)`,
+      [String(name).slice(0, 64), String(phone).slice(0, 32), interest || null, scenario || null, note || null]
+    );
+    res.json({ ok: true, id: r.insertId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: '保存失败' });
+  }
+});
+
+app.get('/api/leads/stats', async (_req, res) => {
+  if (!dbReady) return res.json({ total: 0, today: 0, db: false });
+  try {
+    const pool = getPool();
+    const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM ${TABLES.leads}`);
+    const [[{ today }]] = await pool.query(
+      `SELECT COUNT(*) AS today FROM ${TABLES.leads} WHERE DATE(created_at) = CURDATE()`
+    );
+    res.json({ total, today, db: true });
+  } catch (e) {
+    res.status(500).json({ error: '读取统计失败' });
+  }
+});
+
+app.get('/api/dashboard', async (_req, res) => {
+  if (!dbReady) {
+    return res.status(503).json({ error: '数据库未连接，暂无法读取看板数据' });
+  }
+  try {
+    const pool = getPool();
+    const [projects] = await pool.query(
+      `SELECT id, channel, project_name, stage, budget_range, owner, updated_at
+       FROM ${TABLES.projects}
+       ORDER BY updated_at DESC
+       LIMIT 12`
+    );
+    const [timeline] = await pool.query(
+      `SELECT id, event_time, event_type, customer_name, summary, source
+       FROM ${TABLES.timeline}
+       ORDER BY event_time DESC
+       LIMIT 12`
+    );
+    const [[{ chatToday }]] = await pool.query(
+      `SELECT COUNT(*) AS chatToday FROM ${TABLES.chats} WHERE DATE(created_at)=CURDATE()`
+    );
+    res.json({
+      db: true,
+      projects,
+      timeline,
+      chatToday,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: '读取看板数据失败' });
+  }
+});
+
+const SYSTEM_PROMPT = `你是「桓颐装饰」的资深家装顾问与获客策略助理。公司聚焦上海住宅与商铺装修，主打 AI 维修检测获客、新房交付与商铺新租数据获客、智能报价与内容流量。
+回答要专业、简洁、可信；涉及价格用区间表述；鼓励用户留下联系方式以便设计师回访；单次回复控制在 400 字以内。`;
+
+app.post('/api/chat', async (req, res) => {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: '未配置 DEEPSEEK_API_KEY' });
+  }
+  const { message, sessionId, history = [] } = req.body || {};
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ error: '请输入咨询内容' });
+  }
+  const sid = sessionId && String(sessionId).length >= 8 ? String(sessionId) : crypto.randomUUID();
+
+  const messages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...history.slice(-10).map((h) => ({
+      role: h.role === 'assistant' ? 'assistant' : 'user',
+      content: String(h.content).slice(0, 4000),
+    })),
+    { role: 'user', content: message.slice(0, 4000) },
+  ];
+
+  try {
+    const r = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages,
+        temperature: 0.6,
+        max_tokens: 1024,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      console.error('DeepSeek error:', data);
+      return res.status(502).json({ error: data.error?.message || 'AI 服务暂时不可用' });
+    }
+    const text = data.choices?.[0]?.message?.content || '';
+    if (dbReady) {
+      try {
+        const pool = getPool();
+        await pool.query(`INSERT INTO ${TABLES.chats} (session_id, role, content) VALUES (?,?,?)`, [
+          sid,
+          'user',
+          message.slice(0, 8000),
+        ]);
+        await pool.query(`INSERT INTO ${TABLES.chats} (session_id, role, content) VALUES (?,?,?)`, [
+          sid,
+          'assistant',
+          text.slice(0, 8000),
+        ]);
+      } catch (e) {
+        console.warn('[db] 聊天记录写入失败', e.message);
+      }
+    }
+    res.json({ reply: text, sessionId: sid });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: '网络异常，请稍后重试' });
+  }
+});
+
+const dist = path.join(__dirname, '..', 'dist');
+app.use(express.static(dist));
+app.use((req, res, next) => {
+  if (req.method !== 'GET' || req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(dist, 'index.html'), (err) => {
+    if (err) next(err);
+  });
+});
+
+ensureDb().then(() => {
+  app.listen(PORT, () => {
+    console.log(`桓颐装饰 AI 获客服务已启动 http://localhost:${PORT}`);
+  });
+});
